@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+# vim: set fileencoding=utf-8 :
+
+import os, sys, math, locale;
+import optparse;
+import re
+from optparse import *;
+from stat import *;
+try:
+   from eyeD3 import *;
+   from eyeD3.tag import *;
+   from eyeD3.frames import *;
+   from eyeD3.utils import *;
+except ImportError:
+   # For development
+   sys.path.append("../src");
+   from eyeD3 import *;
+   from eyeD3.tag import *;
+   from eyeD3.frames import *;
+   from eyeD3.utils import *;
+ENCODING = locale.getpreferredencoding();
+
+def main():
+    for f in sys.argv[1:]:
+        print "file = %s" % f
+        m = re.search(r'(?:/|^)(\d+)\.?([^\d].*)\.mp3', f)
+        track = None
+        filename = None
+        debug = False
+        if m:
+            track = int(m.group(1))
+            filename = m.group(2)
+            filename = filename.replace("_", " ").strip()
+        tagversion = eyeD3.ID3_ANY_VERSION
+        audioFile = eyeD3.tag.Mp3AudioFile(f, tagversion);
+        tag = audioFile.getTag();
+        t = tag.getTitle()
+        fixupText(t, debug)
+        fixupText(filename, True)
+
+
+def fixupText(t, debug = False):
+    index = 0
+    bytes = []
+    skip = False
+    total = 0
+    failed = False
+    while index < len(t):
+        c = t[index]
+        total = total + ord(c)
+        # it's quite frequent to have utf-8 chars in sttrings with latin-1
+        # encoding
+        if (ord(c) == 0xEF or ord(c) == 0xBD or ord(c) == 0xBF):
+            failed = True
+        if (ord(c) == 0xC2 or ord(c) == 0xC3) and index < len(t):
+            c2 = t[index + 1]
+            # In the latin-1 supplement of the unicode block chars between 0x80 and 0x9F
+            # are not printable and A0 to AF are symbols that are very unlikely to be
+            # after u"Ã" char
+            if ord(c2) >= 0x80 and ord(c2) <= 0xAF:
+                val = ((ord(c) & 0x1F) <<6) + (ord(c2) & 0x3F)
+                bytes.append(val)
+                skip = True
+        elif not skip:
+            bytes.append(ord(c))
+        else:
+            skip = False
+
+        index = index + 1
+        if debug:
+            sys.stdout.write("%c(%s)" % (c, hex(ord(c))))
+    if index == 0:
+        index = 1
+    if debug:
+        print "\nAverage code point value = %d" % (total/index)
+    fixed = "".join(map(unichr, bytes))
+    if not failed:
+        print "Before = %s\nCorrected = %s" % (t, fixed)
+        return (fixed, total/index)
+    else:
+        return (None, None)
+
+#######################################################################
+if __name__ == "__main__":
+    retval = 0
+    profiling = False
+    profile_out = None
+
+    try:
+        if "--run-profiler" in sys.argv:
+            profiling = True
+            profile_out = 'eyeD3-profiler.out'
+            import profile
+            profile.run('main()', profile_out)
+        else:
+            retval = main();
+    except KeyboardInterrupt:
+        retval = 0
+    except Exception, ex:
+        import traceback
+        print >>sys.stderr, "Uncaught exception:", str(ex)
+        print >>sys.stderr, traceback.format_exc()
+        retval = 1
+    finally:
+        if profiling:
+            import pstats
+            p = pstats.Stats(profile_out)
+            p.sort_stats('cumulative').print_stats(100)
+
+    sys.exit(retval)
