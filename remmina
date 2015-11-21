@@ -1,0 +1,10 @@
+import base64
+from Crypto.Cipher import DES3
+
+secretb64='Phm6wnvOpoGv/fUAHmegQQrWeflMMHVCEuAMb3r+Frg='
+passwordb64='4f1wxpV3LfhbztmXxkb2ow=='
+
+secret = base64.decodestring(secretb64)
+password = base64.decodestring(passwordb64)
+
+print DES3.new(secret[:24], DES3.MODE_CBC, secret[24:]).decrypt(password)
