@@ -1,0 +1,11 @@
+#!/usr/bin/env python
+
+import krbV
+
+ccache_file="/tmp/krb5cc_1000"
+ctx = krbV.default_context()
+ccache = krbV.CCache(name='FILE:' + ccache_file, context=ctx)
+cprinc = ccache.principal()
+print ccache
+print cprinc
+#sprinc = krbV.Principal(name=opts.principal, context=ctx)
