@@ -1,0 +1,72 @@
+#!/bin/bash
+
+export KRB5CCNAME=/tmp/sync.$$
+. /usr/local/etc/ecv/list_dcs
+cont=0
+me=`hostname -s`
+domain=`hostname -d`
+# Add some randomness 
+sleep $(( $RANDOM % 50 ))
+rm -rf /usr/local/domains/$domain/staging/*
+kinit -k -t /etc/krb5.keytab  `hostname -s | tr "[:lower:]" "[:upper:]"`\$
+date +%s >/usr/local/domains/$domain/sysvol/.flag
+for dc in $LIST_DC; do
+	#echo "doing dc $dc, me = $me"
+	if [ $dc == $me ]; then
+		continue
+	fi
+	ping -c 2 $dc >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		continue
+	else
+		cont=1
+	fi
+	[ ! -f /usr/local/domains/$domain/staging/.lastts.$dc ]&& touch /usr/local/domains/$domain/staging/.lastts.$dc
+		rsync  -X -u -a  `hostname -s | tr "[:lower:]" "[:upper:]"`\$@${dc}.${domain}:/usr/local/domains/$domain/sysvol /usr/local/domains/$domain/staging
+	[ $? -ne 0 ]&& continue
+	if [ -f /usr/local/domains/$domain/staging/sysvol/.flag ]; then
+		# A sync is running on another dc ...
+		now=`date +%s`
+		ts=`cat /usr/local/domains/$domain/staging/sysvol/.flag`
+		delta=$(( $now - $ts ))
+		if [ $delta -gt 300 ]; then
+			echo -ne "A sync is already running on $dc for more than 5 minutes, you should "
+			echo "check and if needed remove the following file: /usr/local/domains/$domain/sysvol/.flag"
+		else
+			sleep $(( $RANDOM % 50 + 20))
+			rm -rf /usr/local/domains/$domain/staging/*
+			rsync  -X -u -a  `hostname -s | tr "[:lower:]" "[:upper:]"`\$@${dc}.${domain}:/usr/local/domains/$domain/sysvol /usr/local/domains/$domain/staging
+			if [ -f /usr/local/domains/$domain/staging/sysvol/.flag ]; then
+				#echo "Sync is running"
+				rm -f $KRB5CCNAME
+				[ -f /usr/local/domains/$domain/sysvol/.flag ]&& rm /usr/local/domains/$domain/sysvol/.flag
+				exit 0
+			fi
+		fi
+	fi
+done
+
+if [ $cont -eq 0 ]; then
+	if [ -f /usr/local/domains/$domain/staging/sysvol/.flag ]; then
+		rm /usr/local/domains/$domain/staging/sysvol/.flag
+		exit 0
+	fi
+fi
+csync  /usr/local/domains/$domain/staging/sysvol /usr/local/domains/$domain/sysvol/ 
+set -x
+cd /usr/local/domains/$domain/staging/sysvol
+find . >/tmp/listfiles.$$
+cd /
+while read l; do
+	nb=`getfattr -d -m "" "/usr/local/domains/$domain/sysvol/$l" 2>/dev/null |wc -l`
+	nb2=`getfattr -d -m "" "/usr/local/domains/$domain/staging/sysvol/$l" 2>/dev/null |wc -l`
+	if [ ! -L "/usr/local/domains/$domain/staging/sysvol/$l" -a $nb -eq 0 -a $nb2 -ne 0 ]; then
+		echo "setting acls on $l"
+		getfattr -d -m "" "/usr/local/domains/$domain/staging/sysvol/$l" 2>/dev/null | sed 's@staging/@@' |setfattr --restore=- 2>/dev/null
+	fi
+done </tmp/listfiles.$$
+
+rm /tmp/listfiles.$$
+
+rm -f $KRB5CCNAME
+[ -f /usr/local/domains/$domain/sysvol/.flag ]&& rm /usr/local/domains/$domain/sysvol/.flag
