@@ -1,0 +1,47 @@
+#!/usr/bin/env perl
+#
+
+if (scalar(@ARGV) < 2) {
+	die "Missing filename, basedir or both";
+}
+my $file = $ARGV[0];
+my $basedir = $ARGV[1];
+my $found = 0;
+my $total = 0;
+my @list;
+my @ignore = ('[-Wmaybe-uninitialized]', '[-Wstrict-aliasing]', '[-Wconversion]','[-Wconversion-null]', '[-Wcpp]');
+
+if (!($basedir =~ m@.*/$@)) {
+	$basedir = "$basedir/";
+}
+open(my $handle, "$file") or die "unable to open $file";
+my $dir;
+while (<$handle>) {
+	if (m@Entering directory .$basedir([^/]*/[^/]*).$@) {
+		if ($found > 0) {
+			print "$found warnings in $dir\n";
+			print "\t".join("\t",@list);
+			$total += $found;
+		}
+		@list = ();
+		$dir = $1;
+		$found = 0;
+	}
+	if (m@warning:@ && !m/make\[\d\]/ && !m/libtool/ && !m/configure/ && !m@dsauth/ad/samba-@ && !m@openldap-2.4.23@ && !m@Makefile(.top)?:@ && !m@Make.env:@) {
+		if (m@\[(.*)\]@) {
+			use Data::Dumper;
+			next if grep /\[$1\]/, @ignore;
+		}
+		
+		$found++;
+		push @list, $_;
+	}
+}
+if ($found > 0) {
+	print "$found warnings in $dir\n";
+	print "\t".join("\t",@list);
+	$total += $found;
+}
+print "Total warnings: $total\n";
+close($handle);
+
