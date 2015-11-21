@@ -1,0 +1,410 @@
+#!/usr/bin/perl
+#Scan_and_delay script 
+#Copyright (C) 2008-2011  Matthieu Patou <mat+catchspam at matws dot net>
+#This script should be used as a filter for postfix (might work elsewhere ...)
+#It is based on the observation that when receiving a spam, it will appear soon in the xBL (RBL,XBL, ...)
+#so this script delay mail that have already some clue of being spam so that next run of the filter will invalidate 
+#or confirm this impression.
+#
+#This program is free software: you can redistribute it and/or modify
+#it under the terms of the GNU General Public License as published by
+#the Free Software Foundation, with version 2 of the License
+#
+#This program is distributed in the hope that it will be useful,
+#but WITHOUT ANY WARRANTY; without even the implied warranty of
+#MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#GNU General Public License for more details.
+#
+#You should have received a copy of the GNU General Public License
+#along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+
+use DB_File::Lock;
+use Fcntl;
+use Sys::Syslog qw(:DEFAULT setlogsock);
+use strict;
+
+my $verbose = 0;
+# Should this filter discard spam that are too spam ? (spam score > high threshold)
+my $too_spamish_threshold = 10;
+my $min_score = 3;
+my $max_score = 6;
+my $discard_too_spamish = 1;
+my $database_name = "/var/lib/spamscan/firstscan.db";
+# Minimum number of second between two scan of the filter before freeing the suspect email
+my $delay = 300;
+my $host = "127.0.0.1";
+# The user for spamu (option -u)
+
+my $database_obj=undef;
+my $database_obj2=undef;
+my %attr = ();
+my %db_hash;
+my $option;
+my $from;
+my $user="spamu";
+my $dest;
+my $dests;
+my $invert = 0;
+my $catch_spam_lookup_table;
+my $pattern;
+#
+# Syslogging options for verbose mode and for fatal errors.
+# NOTE: comment out the $syslog_socktype line if syslogging does not
+# work on your system.
+#
+my $syslog_socktype = 'unix'; # inet, unix, stream, console
+my $syslog_facility="mail";
+my $syslog_options="pid";
+my $syslog_priority="info";
+
+my $locking_rw = {
+ mode            => "write",
+ nonblocking     => 1,
+ lockfile_name   => "${database_name}.lck",
+ lockfile_mode   => 0600,
+};
+
+sub test_scaned {
+    my($key, $time_stamp, $now);
+
+    # Open the database on the fly.
+    open_database() unless $database_obj;
+
+    # Lookup the time stamp for this id/sender/recipient.
+    $key = lc ($attr{"message-id"})."/$from/$dest";
+    $time_stamp = read_database($key);
+    $now = time();
+
+    # If this is a new request add this id/sender/recipient to the database.
+    if ($time_stamp == 0) {
+      $time_stamp = $now;
+      update_database($key, $time_stamp);
+    }
+    syslog $syslog_priority, "request age %d", $now - $time_stamp if $verbose;
+    if ($now - $time_stamp > $delay) 
+    {
+      delete_key($key);
+      close_database();
+      return 0;
+    } 
+    else 
+    {
+      close_database(); 
+      return 75;
+    }
+}
+
+#
+# You should not have to make changes below this point.
+#
+sub LOCK_SH { 1 };  # Shared lock (used for reading).
+sub LOCK_EX { 2 };  # Exclusive lock (used for writing).
+sub LOCK_NB { 4 };  # Don't block (for testing).
+sub LOCK_UN { 8 };  # Release lock.
+
+#
+# Log an error and abort.
+#
+
+sub open_lookup_db {
+  my $db = shift;
+  my %hash;
+  $database_obj2 = tie(%hash, 'DB_File', $db,
+    O_RDONLY, 0444, $DB_HASH) || fatal_exit ("Cannot open database %s: $!", $db);
+  my $rhash = {%hash};
+  untie  %hash;
+  return $rhash;
+}
+#
+# Open hash database.
+#
+sub open_database {
+  my $i=0;
+  my $cont=0;
+  while($i < 3)
+  {
+    $cont=0;
+    $database_obj = tie(%db_hash, 'DB_File::Lock', $database_name,
+      O_CREAT|O_RDWR, 0644, $DB_BTREE, $locking_rw) || ($cont=1); 
+    $i++;
+    last unless($cont);
+    syslog $syslog_priority, "Database not available still trying" if $verbose;
+    sleep 5;
+  }
+  fatal_exit("Unable to open database") if($cont);
+}
+
+sub fatal_exit {
+    my($first) = shift(@_);
+    if(open(SENDMAIL,"|/usr/bin/sendmail root"))
+    {
+      print SENDMAIL "From: root\nTo: root\nSubject: Pbs with filter\n\n".join(" ",($first,@_));
+      close SENDMAIL;
+    } 
+    syslog "err", "fatal: $first";
+    close_database() if($database_obj);
+    exit 75;
+}
+sub flush_database {
+  $database_obj->sync;
+}
+sub close_database {
+    flush_database();
+    untie(%db_hash);
+    $database_obj = undef
+}
+#
+# Read database. Use a shared lock to avoid reading the database
+# while it is being changed. XXX There should be a way to synchronize
+# our cache from the on-file database before looking up the key.
+#
+sub read_database {
+  my($key) = @_;
+  my($value);
+  $value = $db_hash{$key};
+  return $value;
+}
+
+#
+# Update database. Use an exclusive lock to avoid collisions with
+# other updaters, and to avoid surprises in database readers. XXX
+# There should be a way to synchronize our cache from the on-file
+# database before updating the database.
+#
+sub update_database 
+{
+  my($key, $value) = @_;
+  $db_hash{$key} = $value;
+}
+
+sub delete_key 
+{
+  my($key) = @_;
+  delete $db_hash{$key};
+}
+
+
+#
+# Signal 11 means that we have some kind of database corruption (yes
+# Berkeley DB should handle this better).  Move the corrupted database
+# out of the way, and start with a new database.
+#
+sub sigsegv_handler {
+  my $backup = $database_name . "." . time();
+  rename $database_name, $backup || 
+    fatal_exit "Can't save %s as %s: $!", $database_name, $backup;
+  fatal_exit "Caught signal 11; the corrupted database is saved as $backup";
+}
+
+$SIG{'SEGV'} = 'sigsegv_handler';
+
+#
+# This process runs as a daemon, so it can't log to a terminal. Use
+# syslog so that people can actually see our messages.
+#
+setlogsock $syslog_socktype;
+openlog $0, $syslog_options, $syslog_facility;
+
+#
+# We don't need getopt() for now.
+#
+while ($option = shift(@ARGV)) 
+{
+  if ( $option eq "-d" )
+  {
+    $catch_spam_lookup_table = shift(@ARGV);
+  }
+  if ( $option eq "-m" )
+  {
+    $pattern = shift(@ARGV);
+  }
+  if ( $option eq "-i" )
+  {
+    $invert = 1;
+  }
+  if ( $option eq "-v" ) 
+  {
+    $verbose = 1;
+  }
+  if ( $option eq "-t" )
+  {
+    $dest = shift(@ARGV);
+    $dests = $dest;
+    while( my $more = shift(@ARGV) )
+    {
+      if( $more =~m/^-/ )
+      {
+        unshift @ARGV, $more;
+        last;
+      }
+      $dests .= " $more";
+    }
+  }
+  if ( $option eq "-u" )
+  {
+    $user = shift(@ARGV);
+  }
+  if ( $option eq "-f" )
+  {
+    $from = shift(@ARGV);
+  }
+}
+my $list;
+if( defined $catch_spam_lookup_table && defined $pattern )
+{
+  $list = open_lookup_db($catch_spam_lookup_table);
+  #Invert the list if the pattern we search is not the key but the value 
+  my $list2 = {};
+  if( $invert )
+  {
+    foreach my $k (keys(%$list))
+    {
+     if( defined $list2->{$list->{$k}} )
+     {
+       push @{$list2->{$list->{$k}}}, $k
+     } 
+     else
+     {
+       $list2->{$list->{$k}} = [$k];
+     }
+    }
+  }
+  #Find only email that match this pattern 
+  $list = [map{ @{$list2->{$_}} } grep(/$pattern/,keys %$list2)];
+}
+my $nodelay = 0;
+if( defined $list  && scalar(@$list) )
+{
+# So we have a list of email just for spamcatching
+# Check if one of the receipient is in this list
+  my @dests_list = split(/ /,$dests);
+  sub dogrep
+  {
+    my $e = shift;
+    $e=~m/^(.*)\000$/;
+    $e=$1;
+    return grep /^$e$/ , @dests_list;
+  }
+  my @new_dest = map{ dogrep($_)} @$list;  
+  if( scalar(@new_dest) gt 0)
+  {
+    # The list is not empty so some recipient are catchspam address, 
+    # let's remove non catchspam address and just keep catchspam for the sake of trainning
+    syslog $syslog_priority, "Catchspam address found in recipient" if $verbose;
+    $nodelay=1;
+    $dests=join(' ',@new_dest);
+  }
+}
+if( (!defined $from) || $from eq "" || (!defined $dest) || $dest eq "" )
+{
+  syslog $syslog_priority, "Need from and dest parameter. Usage: %s [-v] -t dest_email -f from_email ", $0;
+  exit 75;
+}
+#
+# Unbuffer standard output.
+#
+select((select(STDOUT), $| = 1)[0]);
+
+#
+# Receive a bunch of attributes, evaluate the policy, send the result.
+#
+my $msg = "";
+my $in = 1;
+my $drop = 0;
+while (<STDIN>) 
+{
+  if (m/Message-ID: (.*)\n/i) 
+  {
+    $attr{"message-id"} = substr($1, 0, 512);
+  } 
+  elsif ($in && $_ eq "\n") 
+  {
+    $in = 0;
+    #syslog $syslog_priority, "Message-ID: %s", $attr{"message-id"} if $verbose;
+  } 
+  $msg .= $_;
+}
+my $new_msg = "";
+my $score;
+my $isspam = "No";
+
+my $pid = open(SPAMC_OUT, "-|");
+if( $pid )
+{
+  # Father
+  while(<SPAMC_OUT>)
+  {
+    if( !defined $score && m/X-Spam-Status: ((?:No)|(?:Yes)), score=(-?\d+\.?\d?) /)
+    {
+      $score = $2;
+      $isspam = $1;
+      $new_msg .="X-delivered-for-ecv: ".$dests."\n"; 
+    }
+    $new_msg .= $_;
+  }
+  exit 75 if( length($new_msg) <100 );
+}
+else
+{
+  # spamc should at least always return the initial message so in the father we just check that the message is not empty ... 
+  open(SPAMC_IN,"|/usr/bin/spamc -d $host -u $user  -s 750000");
+  print SPAMC_IN $msg;
+  close(SPAMC);
+  exit 0;
+}
+close(SPAMC_OUT);
+#syslog $syslog_priority, "Score: %s",$score if $verbose;
+
+my $action = 0;
+if($nodelay)
+{
+  $action = 0;
+  syslog $syslog_priority, "Email for catch-spam address no need to delay ".$attr{"message-id"}." (score $score)" if $verbose;
+}
+elsif( $score > $min_score && $score < $max_score ) 
+{
+  $action = test_scaned();
+  syslog $syslog_priority, "Action: %s (score $score)".$attr{"message-id"}, $action if $verbose;
+
+}
+elsif( $score > 10 && $discard_too_spamish )
+{
+  # Drop the email 
+  syslog $syslog_priority, "Dropping the email ".$attr{"message-id"}." (score $score)" if $verbose;
+  $action = 0;
+  $drop = 1;
+}
+
+if (!$nodelay && !$action) {
+  if ($isspam eq "Yes") {
+    my $txt = "";
+    $txt = " dropped" if $drop;
+    $dest = "";
+    foreach my $dest (split(/ /, $dests)) {
+          syslog $syslog_priority, "Email from $from, score $score to $dest is spam$txt";
+    }
+  } else {
+    syslog $syslog_priority, "Passing email from $from as not spam" if $verbose;
+  }
+} 
+%attr = ();
+if(!$action && !$drop) 
+{
+  #syslog $syslog_priority, "Sendmail: /usr/sbin/sendmail -oi -f \"$from\" \"$dests\" " if $verbose;
+  if(open(SEND,"|/usr/sbin/sendmail -oi -f \"$from\" \"$dests\""))
+  {
+    print SEND $new_msg;
+    close SEND;
+  }
+  else
+  {
+    # Can't deliver filtered message, ask kindly the server to put it in its queue 
+    syslog $syslog_priority, "Sendmail command failed !" if $verbose;
+    $action = 75;
+  }
+}
+ 
+exit $action;
+
