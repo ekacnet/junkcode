@@ -33,14 +33,38 @@ md = {
  'network': {
   'interfaces': {
    'macs': {
-    '12:31:38:10:88:01': {
+     '08:00:27:ff:a3:fb': {
+     'device-number': '0',
+     'interface-id': 'eni-fef609f0',
      'local-hostname': 'ip-10-127-107-239.ec2.internal',
-     'local-ipv4s': '10.127.107.239',
-     'mac': '12:31:38:10:88:01',
-     'public-hostname': 'ec2-50-19-60-80.compute-1.amazonaws.com',
-     'public-ipv4s': '50.19.60.80',
-     'security-groups': 'default'
-    }
+     'local-ipv4s': '172.16.100.50',
+     'mac': '08:00:27:ff:a3:fb',
+     'public-hostname': 'ec2-52-9-179-132.us-west-1.compute.amazonaws.com',
+     'public-ipv4s': '52.9.179.132',
+     'ownerid': 813663096831,
+     'security-group-ids': 'sg-0e86986a',
+     'security-groups': 'launch-wizard-4',
+     'subnet-id': 'subnet-7f9ded26',
+     'subnet-ipv4-cidr-block': '172.16.100.0/24',
+     'vpc-id': 'vpc-47e6a122',
+     'vpc-ipv4-cidr-block': '10.7.0.0/16',
+     'vpc-ipv4-cidr-blocks': '10.7.0.0/16',
+     },
+    '12:31:38:10:88:02': {
+     'device-number': 1,
+     'interface-id': 'eni-fef609f1',
+     'local-hostname': 'ip-10-127-107-239.ec2.internal',
+     'local-ipv4s': '10.127.107.240',
+     'mac': '12:31:38:10:88:02',
+     'ownerid': 813663096831,
+     'security-group-ids': 'sg-0e86986a',
+     'security-groups': 'launch-wizard-4',
+     'subnet-id': 'subnet-7f9ded26',
+     'subnet-ipv4-cidr-block': '10.7.0.0/24',
+     'vpc-id': 'vpc-47e6a122',
+     'vpc-ipv4-cidr-block': '10.7.0.0/16',
+     'vpc-ipv4-cidr-blocks': '10.7.0.0/16',
+      }
    }
   }
  },
@@ -111,6 +135,8 @@ class myRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 			output = None
 		elif isinstance(cur,str):
 			output = cur
+		elif isinstance(cur,int):
+			output = cur
 		else:
 			mlist = []
 			for k in sorted(cur.keys()):
@@ -148,7 +174,7 @@ def run_while_true(server_class=BaseHTTPServer.HTTPServer,
 
 args = { }
 args['handler_class'] = myRequestHandler
-args['port'] = 8000
+args['port'] = 80
 args['ipaddr'] = ''
 if len(sys.argv) == 2:
 	toks = sys.argv[1].split(":")
